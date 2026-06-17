@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arista-ztp-dashboard"
+version = "0.1.0"
+description = "Arista ZTP provisioning dashboard"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+arista-ztp-dashboard = "ztp_dashboard.launcher:main"
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.0"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["ztp_dashboard*"]
+
+[tool.setuptools.package-data]
+ztp_dashboard = ["data/*.py"]
