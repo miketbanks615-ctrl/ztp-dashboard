@@ -44,6 +44,7 @@ try {
     "--onefile",
     "--windowed",
     "--name", "AristaZTPDashboard",
+    "--version-file", "version_info.txt",
     "--collect-all", "ztp_dashboard",
     "--add-data", "ztp_dashboard\data;ztp_dashboard\data",
     "ztp_dashboard\launcher.py"
