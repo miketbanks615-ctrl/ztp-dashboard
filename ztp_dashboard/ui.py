@@ -170,6 +170,65 @@ def _setup_working_dir(path: Path, effective_ip: str | None, port: int) -> None:
         _check_and_update_script(script_dest, effective_ip, port)
 
 
+def _read_eos_config(script_path: Path | None) -> tuple[str, dict[str, str]]:
+    """Read TARGET_VERSION and uncommented EOS_BY_MODEL entries from startup script."""
+    if not script_path or not script_path.exists():
+        return "", {}
+    content = script_path.read_text(encoding="utf-8")
+    m = re.search(r'^TARGET_VERSION\s*=\s*"([^"]*)"', content, re.MULTILINE)
+    target = m.group(1) if m else ""
+    by_model: dict[str, str] = {}
+    m2 = re.search(r'^EOS_BY_MODEL\s*=\s*\{([^}]*)\}', content, re.MULTILINE | re.DOTALL)
+    if m2:
+        for line in m2.group(1).splitlines():
+            stripped = line.strip().rstrip(",")
+            if stripped.startswith("#") or not stripped:
+                continue
+            kv = re.match(r"""['"]([^'"]+)['"]\s*:\s*['"]([^'"]+)['"]""", stripped)
+            if kv:
+                by_model[kv.group(1)] = kv.group(2)
+    return target, by_model
+
+
+def _write_eos_config(
+    script_path: Path, target_version: str, eos_by_model: dict[str, str]
+) -> None:
+    """Rewrite TARGET_VERSION and EOS_BY_MODEL in startup script."""
+    content = script_path.read_text(encoding="utf-8")
+    content = re.sub(
+        r'^(TARGET_VERSION\s*=\s*)"[^"]*"',
+        rf'\1"{target_version}"',
+        content, flags=re.MULTILINE,
+    )
+    if eos_by_model:
+        entries = "\n".join(f"    '{k}': '{v}'," for k, v in eos_by_model.items())
+        new_block = f"EOS_BY_MODEL = {{\n{entries}\n}}"
+    else:
+        new_block = "EOS_BY_MODEL = {}"
+    content = re.sub(
+        r"^EOS_BY_MODEL\s*=\s*\{[^}]*\}",
+        new_block,
+        content, flags=re.MULTILINE | re.DOTALL,
+    )
+    script_path.write_text(content, encoding="utf-8")
+
+
+def _maybe_auto_set_eos(script_path: Path | None, eos_images: list[str]) -> str:
+    """If exactly one .swi exists and TARGET_VERSION doesn't match, auto-update it.
+    Returns: 'auto_set', 'ok', 'multi', 'none', or 'no_script'."""
+    if not script_path or not script_path.exists():
+        return "no_script"
+    if not eos_images:
+        return "none"
+    if len(eos_images) > 1:
+        return "multi"
+    target, by_model = _read_eos_config(script_path)
+    if target != eos_images[0]:
+        _write_eos_config(script_path, eos_images[0], by_model)
+        return "auto_set"
+    return "ok"
+
+
 # ── main entry point ──────────────────────────────────────────────────────────
 
 def run_ui(
@@ -281,6 +340,8 @@ def run_ui(
                     self._redirect("All device history cleared.")
                 elif path == "/clear-device":
                     self._clear_device(body)
+                elif path == "/save-eos-config":
+                    self._save_eos_config(body)
                 elif path == "/shutdown":
                     self._shutdown()
                 else:
@@ -495,6 +556,16 @@ def run_ui(
             cfg_files = _scan_all_files(cd)        # all files in configs dir
             eos_images = _scan_eos(ed)             # .swi only
             eos_files = _scan_all_files(ed)        # all files in images dir
+
+            # EOS version config — auto-set TARGET_VERSION when only one image present
+            script_path = (wd / "arista-ztp-startup.py") if wd else None
+            eos_auto_status = _maybe_auto_set_eos(script_path, eos_images)
+            target_version, eos_by_model = (
+                _read_eos_config(script_path)
+                if script_path and script_path.exists()
+                else ("", {})
+            )
+
             devices = st().all_devices()
             known = {d["serial"] for d in devices}
             for serial in inventory:
@@ -515,6 +586,7 @@ def run_ui(
                 wd is not None and wd.exists()
                 and cd_ok and ed_ok
                 and script_status in ("ok", "updated")
+                and (not eos_images or bool(target_version))
             )
 
             self._json({
@@ -530,6 +602,9 @@ def run_ui(
                 "eos_dir_exists": ed_ok,
                 "script_status": script_status,
                 "script_message": script_message,
+                "eos_auto_status": eos_auto_status,
+                "eos_target_version": target_version,
+                "eos_by_model": eos_by_model,
                 "ready": ready,
                 "server_time": _iso_now(),
             })
@@ -567,6 +642,21 @@ def run_ui(
             st().set_setting("configs_dir", cd)
             st().set_setting("eos_dir", ed)
             self._redirect("Settings saved.")
+
+        def _save_eos_config(self, body: bytes) -> None:
+            wd = _working_dir()
+            if not wd:
+                raise ValueError("No working folder configured.")
+            script_path = wd / "arista-ztp-startup.py"
+            if not script_path.exists():
+                raise ValueError("Startup script not found in working folder.")
+            data = urllib.parse.parse_qs(body.decode("utf-8"), keep_blank_values=True)
+            default_image = (data.get("default_image", [""])[0] or "").strip()
+            model_keys = [k.strip() for k in data.get("model_key", [])]
+            model_images = [v.strip() for v in data.get("model_image", [])]
+            eos_by_model = {k: v for k, v in zip(model_keys, model_images) if k and v}
+            _write_eos_config(script_path, default_image, eos_by_model)
+            self._redirect("EOS version config saved.")
 
         def _clear_device(self, body: bytes) -> None:
             data = urllib.parse.parse_qs(body.decode("utf-8"), keep_blank_values=True)
@@ -655,6 +745,80 @@ def run_ui(
             status_meta_json = json.dumps(
                 {k: {"label": v[0], "color": v[1], "pulse": v[2]} for k, v in STATUS_META.items()}
             )
+
+            # EOS version assignment section
+            eos_images_list = _scan_eos(ed)
+            script_path_p = (wd / "arista-ztp-startup.py") if wd else None
+            eos_target, eos_model_map = (
+                _read_eos_config(script_path_p)
+                if script_path_p and script_path_p.exists()
+                else ("", {})
+            )
+
+            def _img_options(images: list[str], selected: str) -> str:
+                opts = ['<option value="">— select —</option>']
+                all_imgs = list(images)
+                if selected and selected not in images:
+                    all_imgs.append(selected)
+                for img in all_imgs:
+                    s = " selected" if img == selected else ""
+                    label = (f"{html.escape(img)} ⚠ missing"
+                             if img == selected and img not in images
+                             else html.escape(img))
+                    opts.append(f'<option value="{html.escape(img)}"{s}>{label}</option>')
+                return "".join(opts)
+
+            if eos_images_list or eos_model_map:
+                _def_row = (
+                    f'<tr><td><span class="eos-role eos-role-def">Default</span></td>'
+                    f'<td><span class="eos-all-models">All models (global fallback)</span></td>'
+                    f'<td><select name="default_image" class="eos-sel">'
+                    f'{_img_options(eos_images_list, eos_target)}</select></td>'
+                    f'<td></td></tr>'
+                )
+                _ovr_rows = "".join(
+                    f'<tr class="eos-row">'
+                    f'<td><span class="eos-role eos-role-model">Model Override</span></td>'
+                    f'<td><input type="text" name="model_key" class="eos-inp"'
+                    f' value="{html.escape(mk)}" placeholder="e.g. 7260CX3"/></td>'
+                    f'<td><select name="model_image" class="eos-sel">'
+                    f'{_img_options(eos_images_list, mi)}</select></td>'
+                    f'<td><button type="button" class="secondary eos-rm"'
+                    f' onclick="this.closest(\'tr\').remove()">✕</button></td></tr>'
+                    for mk, mi in eos_model_map.items()
+                )
+                eos_section_html = f"""
+  <section>
+    <h2>EOS Version Assignment</h2>
+    <p class="eos-intro">The <strong>Default</strong> image sets <code>TARGET_VERSION</code>
+    and applies to any model without a specific override. Model patterns are matched as
+    substrings against the model string from <code>show version</code>
+    (e.g. <code>7260CX3</code> matches <code>Arista DCS-7260CX3-64</code>).</p>
+    <form method="post" action="/save-eos-config">
+      <div class="tbl-wrap">
+        <table class="eos-tbl">
+          <thead><tr>
+            <th style="width:130px">Role</th>
+            <th>Model Pattern</th>
+            <th>EOS Image</th>
+            <th style="width:38px"></th>
+          </tr></thead>
+          <tbody id="eos-rows">
+            {_def_row}
+            {_ovr_rows}
+          </tbody>
+        </table>
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px">
+        <button type="button" class="secondary" onclick="addEosRow()">+ Add Model Override</button>
+        <button type="submit">Save</button>
+      </div>
+    </form>
+  </section>"""
+            else:
+                eos_section_html = ""
+
+            eos_images_json = json.dumps(eos_images_list)
 
             # Current data_dir (updates after setup re-init)
             current_data_dir = data_dir_ref[0]
@@ -765,6 +929,23 @@ def run_ui(
                 border-top:1px solid #f3f4f6}}
     .data-note code{{background:#f3f4f6;border-radius:3px;padding:1px 5px;
                      font-size:11px;font-family:Consolas,monospace}}
+    /* EOS version assignment */
+    .eos-tbl{{width:100%;border-collapse:collapse;font-size:13px}}
+    .eos-tbl th{{text-align:left;padding:7px 10px;background:#f9fafb;
+                border-bottom:2px solid #e5e7eb;font-size:10px;font-weight:700;
+                text-transform:uppercase;letter-spacing:.06em;color:#374151}}
+    .eos-tbl td{{padding:6px 10px;border-bottom:1px solid #f3f4f6;vertical-align:middle}}
+    .eos-tbl tr:last-child td{{border-bottom:0}}
+    .eos-role{{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;white-space:nowrap}}
+    .eos-role-def{{background:#eff6ff;color:#1d4ed8}}
+    .eos-role-model{{background:#f3f4f6;color:#374151}}
+    .eos-sel{{border:1px solid #d1d5db;border-radius:6px;padding:5px 8px;font:inherit;
+              font-size:13px;width:100%;background:#fff}}
+    .eos-inp{{border:1px solid #d1d5db;border-radius:6px;padding:5px 8px;font:inherit;
+              font-size:13px;width:100%}}
+    .eos-rm{{padding:3px 8px;font-size:12px}}
+    .eos-all-models{{font-size:12px;color:#9ca3af;font-style:italic}}
+    .eos-intro{{font-size:13px;color:#374151;margin:0 0 14px;line-height:1.55}}
     @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.3}}}}
     @media(max-width:700px){{.sg,.dhcp-examples{{grid-template-columns:1fr}}main{{padding:12px}}}}
   </style>
@@ -839,6 +1020,8 @@ def run_ui(
       </div>
     </div>
   </section>
+
+  {eos_section_html}
 
   {dhcp_html}
 
@@ -936,6 +1119,13 @@ function buildStatusBar(d) {{
     parts.push('<span class="si warn">⚠ No EOS Images</span>');
   else
     parts.push(`<span class="si ok">✓ ${{ne}} EOS Image${{ne!==1?'s':''}}</span>`);
+
+  if(d.eos_auto_status==='auto_set')
+    parts.push(`<span class="si ok">✓ EOS Target Auto-Set → ${{esc(d.eos_target_version)}}</span>`);
+  else if(d.eos_auto_status==='multi'&&!d.eos_target_version)
+    parts.push('<span class="si warn">⚠ EOS Default Not Set</span>');
+  else if(d.eos_target_version&&ne>0)
+    parts.push(`<span class="si ok">✓ EOS Default: ${{esc(d.eos_target_version)}}</span>`);
 
   return parts.join('');
 }}
@@ -1045,6 +1235,22 @@ setInterval(refresh, 3000);
 function copyUrl() {{
   const el = document.getElementById('dhcp-url');
   if(el) navigator.clipboard.writeText(el.textContent).catch(()=>{{}});
+}}
+
+const EOS_IMAGES = {eos_images_json};
+function addEosRow() {{
+  const tbody = document.getElementById('eos-rows');
+  if(!tbody) return;
+  let opts = '<option value="">— select —</option>';
+  for(const img of EOS_IMAGES) opts += `<option value="${{esc(img)}}">${{esc(img)}}</option>`;
+  const tr = document.createElement('tr');
+  tr.className = 'eos-row';
+  tr.innerHTML = `
+    <td><span class="eos-role eos-role-model">Model Override</span></td>
+    <td><input type="text" name="model_key" class="eos-inp" placeholder="e.g. 7260CX3"/></td>
+    <td><select name="model_image" class="eos-sel">${{opts}}</select></td>
+    <td><button type="button" class="secondary eos-rm" onclick="this.closest('tr').remove()">✕</button></td>`;
+  tbody.appendChild(tr);
 }}
 </script>
 </body>
