@@ -16,6 +16,21 @@ from pathlib import Path
 from .state import ZTPState
 
 
+ARISTA_MODELS: list[str] = [
+    # Campus / Enterprise
+    "720XP", "720DP", "722XPM", "710XP", "710P", "750",
+    # Data center leaf — 100 G
+    "7050CX3", "7050SX3", "7050TX3", "7060CX2", "7060SX2",
+    # Data center leaf — 400 G
+    "7060CX4", "7060DX4", "7060PX4", "7060X2", "7060X4", "7060X5", "7060X6",
+    # Spine / aggregation
+    "7260CX3", "7280CR2", "7280CR3", "7280DR3", "7280PR3", "7280SR2", "7280SR3",
+    # High-density / AI fabric
+    "7358X4", "7368X4", "7388X4",
+    # Modular chassis
+    "7300X3", "7320X", "7500R2", "7500R3", "7500R4", "7800R3", "7800R4",
+]
+
 STATUS_META: dict[str, tuple[str, str, bool]] = {
     "starting":        ("Starting",        "#6366f1", True),
     "eos_checking":    ("Checking EOS",    "#0170C5", False),
@@ -780,7 +795,7 @@ def run_ui(
                     f'<tr class="eos-row">'
                     f'<td><span class="eos-role eos-role-model">Model Override</span></td>'
                     f'<td><input type="text" name="model_key" class="eos-inp"'
-                    f' value="{html.escape(mk)}" placeholder="e.g. 7260CX3"/></td>'
+                    f' list="arista-models" value="{html.escape(mk)}" placeholder="e.g. 7260CX3"/></td>'
                     f'<td><select name="model_image" class="eos-sel">'
                     f'{_img_options(eos_images_list, mi)}</select></td>'
                     f'<td><button type="button" class="secondary eos-rm"'
@@ -1021,6 +1036,10 @@ def run_ui(
     </div>
   </section>
 
+  <datalist id="arista-models">
+    {"".join(f'<option value="{m}"/>' for m in ARISTA_MODELS)}
+  </datalist>
+
   {eos_section_html}
 
   {dhcp_html}
@@ -1247,7 +1266,7 @@ function addEosRow() {{
   tr.className = 'eos-row';
   tr.innerHTML = `
     <td><span class="eos-role eos-role-model">Model Override</span></td>
-    <td><input type="text" name="model_key" class="eos-inp" placeholder="e.g. 7260CX3"/></td>
+    <td><input type="text" name="model_key" class="eos-inp" list="arista-models" placeholder="e.g. 7260CX3"/></td>
     <td><select name="model_image" class="eos-sel">${{opts}}</select></td>
     <td><button type="button" class="secondary eos-rm" onclick="this.closest('tr').remove()">✕</button></td>`;
   tbody.appendChild(tr);
