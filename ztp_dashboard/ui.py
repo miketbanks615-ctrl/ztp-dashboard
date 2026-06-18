@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from . import __version__
 from .state import ZTPState
 
 
@@ -843,7 +844,7 @@ def run_ui(
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Arista ZTP Dashboard</title>
+  <title>Arista ZTP Dashboard v{__version__}</title>
   <style>
     *{{box-sizing:border-box}}
     body{{margin:0;font-family:Segoe UI,system-ui,sans-serif;background:#f0f2f5;color:#111}}
@@ -864,6 +865,7 @@ def run_ui(
     .top{{display:flex;align-items:flex-start;justify-content:space-between;
           gap:12px;flex-wrap:wrap;margin-bottom:4px}}
     .top-actions{{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-top:4px}}
+    .ver{{font-size:12px;font-weight:400;color:#9ca3af;margin-left:8px;letter-spacing:0}}
     .ips{{font-size:11px;color:#6b7280;margin-top:3px}}
     .ips code{{background:#f3f4f6;border-radius:3px;padding:1px 5px;
                font-family:Consolas,monospace;font-size:11px}}
@@ -969,7 +971,7 @@ def run_ui(
 <main>
   <div class="top">
     <div>
-      <h1>Arista ZTP Dashboard</h1>
+      <h1>Arista ZTP Dashboard <span class="ver">v{__version__}</span></h1>
       <div class="ips">
         {"".join(f'<code>http://{ip}:{port}</code>&nbsp;' for ip in local_ips)}
         &nbsp;·&nbsp;<a href="/setup" style="font-size:11px;color:#6b7280">Change Folder</a>
